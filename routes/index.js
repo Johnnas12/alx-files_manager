@@ -6,6 +6,11 @@ const FilesController = require('../controllers/FilesController');
 
 const router = express.Router();
 
+/**
+ * Injects routes with their handlers to the given Express application.
+ * @param {Express} api
+ */
+
 router.get('/status', AppController.getStatus);
 router.get('/stats', AppController.getStats);
 
