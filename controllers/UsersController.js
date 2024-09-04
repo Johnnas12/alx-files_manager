@@ -1,63 +1,83 @@
-const crypto = require('crypto');
-const { ObjectId } = require('mongodb');
-const dbClient = require('../utils/db');
-const redisClient = require('../utils/redis');
+import { ObjectId } from 'mongodb';
+import sha1 from 'sha1';
+import Queue from 'bull';
+import dbClient from '../utils/db';
+import userUtils from '../utils/user';
 
-class UserController {
-  static async postNew(req, res) {
-    const { email, password } = req.body;
+const userQueue = new Queue('userQueue');
 
-    if (!email) {
-      return res.status(400).json({ error: 'Missing email' });
+class UsersController {
+  /**
+   * Creates a user using email and password
+   *
+   * To create a user, you must specify an email and a password
+   * If the email is missing, return an error Missing email with
+   * a status code 400
+   * If the password is missing, return an error Missing password with
+   * a status code 400
+   * If the email already exists in DB, return an error Already exist with
+   * a status code 400
+   */
+  static async postNew(request, response) {
+    const { email, password } = request.body;
+
+    if (!email) return response.status(400).send({ error: 'Missing email' });
+
+    if (!password) { return response.status(400).send({ error: 'Missing password' }); }
+
+    const emailExists = await dbClient.usersCollection.findOne({ email });
+
+    if (emailExists) { return response.status(400).send({ error: 'Already exist' }); }
+
+    const sha1Password = sha1(password);
+
+    let result;
+    try {
+      result = await dbClient.usersCollection.insertOne({
+        email,
+        password: sha1Password,
+      });
+    } catch (err) {
+      await userQueue.add({});
+      return response.status(500).send({ error: 'Error creating user.' });
     }
-    if (!password) {
-      return res.status(400).json({ error: 'Missing password' });
-    }
 
-    const existingUser = await dbClient.db.collection('users').findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({ error: 'Already Exist' });
-    }
-
-    // hashing password with sh1
-    const sha1Password = crypto.createHash('sha1').update(password).digest('hex');
-
-    // New user Information insert into database
-    const newUser = await dbClient.db.collection('users').insertOne({
+    const user = {
+      id: result.insertedId,
       email,
-      password: sha1Password,
+    };
+
+    await userQueue.add({
+      userId: result.insertedId.toString(),
     });
 
-    return res.status(201).json({ id: newUser.insertedId, email });
+    return response.status(201).send(user);
   }
 
-  // getme function
-  static async getMe(req, res) {
-    const token = req.headers['x-token'];
+  /**
+   *
+   * Should retrieve the user base on the token used
+   *
+   * Retrieve the user based on the token:
+   * If not found, return an error Unauthorized with a
+   * status code 401
+   * Otherwise, return the user object (email and id only)
+   */
+  static async getMe(request, response) {
+    const { userId } = await userUtils.getUserIdAndKey(request);
 
-    if (!token) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
+    const user = await userUtils.getUser({
+      _id: ObjectId(userId),
+    });
 
-    const userId = await redisClient.get(`auth_${token}`);
+    if (!user) return response.status(401).send({ error: 'Unauthorized' });
 
-    if (!userId) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
+    const processedUser = { id: user._id, ...user };
+    delete processedUser._id;
+    delete processedUser.password;
 
-    try {
-      // Use ObjectId directly from mongodb
-      const user = await dbClient.db.collection('users').findOne({ _id: new ObjectId(userId) });
-
-      if (!user) {
-        return res.status(401).json({ error: 'Unauthorized' });
-      }
-
-      return res.status(200).json({ id: user._id, email: user.email });
-    } catch (error) {
-      console.error('Error fetching user:', error);
-      return res.status(500).json({ error: 'Internal Server Error' });
-    }
+    return response.status(200).send(processedUser);
   }
 }
-module.exports = UserController;
+
+export default UsersController;
